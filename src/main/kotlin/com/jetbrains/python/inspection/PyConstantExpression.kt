@@ -37,15 +37,18 @@ class PyConstantExpression : PyInspection() {
                 is PyBoolLiteralExpression -> expression.value
                 is PyBinaryExpression -> evaluateBinaryExpression(expression)
                 is PyParenthesizedExpression -> evaluate(expression.containedExpression)
+
                 is PyPrefixExpression -> when (expression.operator) {
                     NOT_KEYWORD -> !(evaluate(expression.operand).toBoolean() ?: return null)
+                    PLUS -> evaluate(expression.operand).toInt()
+                    MINUS -> -(evaluate(expression.operand).toInt() ?: return null)
                     else -> null
                 }
                 else -> null
             }
         }
 
-        private fun evaluateBinaryExpression(expression: PyBinaryExpression): Boolean? {
+        private fun evaluateBinaryExpression(expression: PyBinaryExpression): Any? {
             val operator = expression.operator
             val left = evaluate(expression.leftExpression)
             val right = evaluate(expression.rightExpression)
@@ -59,20 +62,31 @@ class PyConstantExpression : PyInspection() {
                         else -> null
                     }
                 }
-                else -> {
-                    val leftInt = left.toInt() ?: return null
-                    val rightInt = right.toInt() ?: return null
+                else -> evaluateIntBinaryExpression(operator, left.toInt(), right.toInt())
+            }
+        }
 
-                    when (operator) {
-                        LT -> leftInt < rightInt
-                        GT -> leftInt > rightInt
-                        LE -> leftInt <= rightInt
-                        GE -> leftInt >= rightInt
-                        EQEQ -> leftInt == rightInt
-                        NE -> leftInt != rightInt
-                        else -> null
-                    }
-                }
+        private fun evaluateIntBinaryExpression(operator: PyElementType?, left: Int?, right: Int?): Any? {
+            left ?: return null
+            right ?: return null
+            return when (operator) {
+                EQEQ -> left == right
+                NE -> left != right
+
+                LT -> left < right
+                GT -> left > right
+                LE -> left <= right
+                GE -> left >= right
+
+                PLUS -> left + right
+                MINUS -> left - right
+                MULT -> left * right
+                EXP -> if (right < 0) null else Math.pow(left.toDouble(), right.toDouble()).toInt()
+
+                DIV -> if (right != 0 && left % right == 0) left / right else null // skip floats
+                FLOORDIV -> if (right != 0) left / right else null
+                PERC -> if (right != 0) left % right else null
+                else -> null
             }
         }
     }

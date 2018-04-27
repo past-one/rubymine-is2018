@@ -27,84 +27,136 @@ class PyConstantExpression : PyInspection() {
 
         private fun processIfPart(pyIfPart: PyIfPart) {
             val condition = pyIfPart.condition
-            val result = evaluate(condition).toBoolean() ?: return
+            val result = PyExpr.evaluate(condition).result ?: return
             registerProblem(condition, "The condition is always $result")
         }
+    }
 
-        private fun evaluate(expression: PyExpression?): Any? {
-            return when (expression) {
-                is PyNumericLiteralExpression -> expression.getInt()
-                is PyBoolLiteralExpression -> expression.value
-                is PyBinaryExpression -> evaluateBinaryExpression(expression)
-                is PyParenthesizedExpression -> evaluate(expression.containedExpression)
+    private sealed class PyExpr {
+        val result: Boolean?
+            get() = (applyBool() as? BoolExpr)?.value
 
-                is PyPrefixExpression -> when (expression.operator) {
-                    NOT_KEYWORD -> !(evaluate(expression.operand).toBoolean() ?: return null)
-                    PLUS -> evaluate(expression.operand).toInt()
-                    MINUS -> -(evaluate(expression.operand).toInt() ?: return null)
-                    else -> null
-                }
-                else -> null
-            }
-        }
+        companion object {
+            fun evaluate(expression: PyExpression?): PyExpr {
+                return when (expression) {
+                    is PyBoolLiteralExpression -> BoolExpr(expression.value)
+                    is PyBinaryExpression -> evaluateBinaryExpression(expression)
+                    is PyParenthesizedExpression -> evaluate(expression.containedExpression)
 
-        private fun evaluateBinaryExpression(expression: PyBinaryExpression): Any? {
-            val operator = expression.operator
-            val left = evaluate(expression.leftExpression)
-            val right = evaluate(expression.rightExpression)
-            return when (operator) {
-                AND_KEYWORD, OR_KEYWORD -> {
-                    val leftBool = left.toBoolean()
-                    val rightBool = right.toBoolean()
-                    when (operator) {
-                        AND_KEYWORD -> if (leftBool == true) rightBool else leftBool
-                        OR_KEYWORD -> if (leftBool == false) rightBool else leftBool
-                        else -> null
+                    is PyNumericLiteralExpression -> {
+                        val value = expression.getInt()
+                        if (value != null) IntExpr(value) else UnknownExpr
                     }
+
+                    is PyPrefixExpression -> {
+                        val value = evaluate(expression.operand)
+                        when (expression.operator) {
+                            NOT_KEYWORD -> !value
+                            PLUS -> +value
+                            MINUS -> -value
+                            else -> UnknownExpr
+                        }
+                    }
+                    else -> UnknownExpr
                 }
-                else -> evaluateIntBinaryExpression(operator, left.toInt(), right.toInt())
+            }
+
+            private fun evaluateBinaryExpression(expression: PyBinaryExpression): PyExpr {
+                val operator = expression.operator
+                val left = evaluate(expression.leftExpression)
+                val right = evaluate(expression.rightExpression)
+                return when (operator) {
+                    AND_KEYWORD -> left.andKeyword(right)
+                    OR_KEYWORD -> left.orKeyword(right)
+
+                    EQEQ -> left.eq(right)
+                    NE -> left.ne(right)
+
+                    LT -> left.lt(right)
+                    GT -> left.gt(right)
+                    LE -> left.le(right)
+                    GE -> left.ge(right)
+
+                    PLUS -> left + right
+                    MINUS -> left - right
+                    MULT -> left * right
+                    EXP -> left.pow(right)
+
+                    DIV -> left / right
+                    FLOORDIV -> left.floorDiv(right)
+                    PERC -> left % right
+                    else -> UnknownExpr
+                }
             }
         }
 
-        private fun evaluateIntBinaryExpression(operator: PyElementType?, left: Int?, right: Int?): Any? {
-            left ?: return null
-            right ?: return null
-            return when (operator) {
-                EQEQ -> left == right
-                NE -> left != right
+        data class IntExpr(val value: Int) : PyExpr()
+        data class BoolExpr(val value: Boolean) : PyExpr()
 
-                LT -> left < right
-                GT -> left > right
-                LE -> left <= right
-                GE -> left >= right
+        object UnknownExpr : PyExpr()
 
-                PLUS -> left + right
-                MINUS -> left - right
-                MULT -> left * right
-                EXP -> if (right < 0) null else Math.pow(left.toDouble(), right.toDouble()).toInt()
+        fun applyBool(mapper: (Boolean) -> PyExpr = { BoolExpr(it) }) = when (this) {
+            is BoolExpr -> mapper(value)
+            is IntExpr -> mapper(value != 0)
+            is UnknownExpr -> this
+        }
 
-                DIV -> if (right != 0 && left % right == 0) left / right else null // skip floats
-                FLOORDIV -> if (right != 0) left / right else null
-                PERC -> if (right != 0) left % right else null
-                else -> null
+        fun applyInt(mapper: (Int) -> PyExpr = { IntExpr(it) }) = when (this) {
+            is IntExpr -> mapper(value)
+            is BoolExpr -> mapper(if (value) 1 else 0)
+            is UnknownExpr -> this
+        }
+
+        fun applyBinaryInt(other: PyExpr, mapper: (Int, Int) -> PyExpr) = applyInt { left ->
+            other.applyInt { right -> mapper(left, right) }
+        }
+
+        operator fun unaryPlus() = applyInt()
+        operator fun unaryMinus() = applyInt { IntExpr(-it) }
+
+        operator fun not() = applyBool { BoolExpr(!it) }
+
+        fun andKeyword(other: PyExpr): PyExpr = applyBool { left ->
+            if (left) other.applyBool() else BoolExpr(false)
+        }
+
+        fun orKeyword(other: PyExpr): PyExpr = applyBool { left ->
+            if (left) BoolExpr(true) else other.applyBool()
+        }
+
+        fun eq(other: PyExpr): PyExpr = applyBinaryInt(other) { left, right -> BoolExpr(left == right) }
+        fun ne(other: PyExpr): PyExpr = applyBinaryInt(other) { left, right -> BoolExpr(left != right) }
+
+        fun lt(other: PyExpr): PyExpr = applyBinaryInt(other) { left, right -> BoolExpr(left < right) }
+        fun gt(other: PyExpr): PyExpr = applyBinaryInt(other) { left, right -> BoolExpr(left > right) }
+        fun le(other: PyExpr): PyExpr = applyBinaryInt(other) { left, right -> BoolExpr(left <= right) }
+        fun ge(other: PyExpr): PyExpr = applyBinaryInt(other) { left, right -> BoolExpr(left >= right) }
+
+        operator fun plus(other: PyExpr) = applyBinaryInt(other) { left, right -> IntExpr(left + right) }
+        operator fun minus(other: PyExpr) = applyBinaryInt(other) { left, right -> IntExpr(left - right) }
+        operator fun times(other: PyExpr) = applyBinaryInt(other) { left, right -> IntExpr(left * right) }
+
+        fun pow(other: PyExpr) = applyBinaryInt(other) { left, right ->
+            if (right < 0) {
+                UnknownExpr
+            } else {
+                var result = 1
+                for (i in 1..right) result *= left
+                IntExpr(result)
             }
         }
-    }
-}
 
-private fun Any?.toBoolean(): Boolean? {
-    return when (this) {
-        is Boolean -> this
-        is Int -> this != 0
-        else -> null
-    }
-}
+        operator fun div(other: PyExpr) = applyBinaryInt(other) { left, right ->
+            if (right != 0 && left % right == 0) IntExpr(left / right) else UnknownExpr // skip floats
+        }
 
-private fun Any?.toInt(): Int? {
-    return when (this) {
-        is Boolean -> if (this) 1 else 0
-        is Int -> this
-        else -> null
+        fun floorDiv(other: PyExpr) = applyBinaryInt(other) { left, right ->
+            if (right != 0) IntExpr(left / right) else UnknownExpr
+        }
+
+        operator fun rem(other: PyExpr) = applyBinaryInt(other) { left, right ->
+            if (right != 0) IntExpr(left % right) else UnknownExpr
+        }
     }
 }
 
